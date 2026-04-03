@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "One Click Workout Planner",
+    "slug": "one-click-workout-planner",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0B1220"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "android": {
+      "package": "com.androidfactory.one.click.workout.planner",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B1220"
+      }
+    }
+  }
+}
