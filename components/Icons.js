@@ -20,6 +20,8 @@ const glyphMap = {
   'expand-more': '▾',
   close: '✕',
   'check-circle': '✔️',
+  'radio-button-unchecked': '○',
+  check: '✓',
 };
 
 export function MaterialIcons({ name, size = 18, color = '#000', style }) {
