@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, RefreshControl, ScrollView, StatusBar, StyleSheet, Switch, Text, TextInput, View } from "react-native";
-import { SafeAreaProvider, useSafeAreaInsets, SafeAreaView } from "react-native-safe-area-context";
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, StatusBar, StyleSheet, Text, View } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -8,6 +8,11 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import { MaterialIcons } from './components/Icons';
+import PlannerScreen from './components/PlannerScreen';
+import ProfileForm from './components/ProfileForm';
+import PlanControls from './components/PlanControls';
+import WorkoutPlanView from './components/WorkoutPlanView';
+import HistorySection from './components/HistorySection';
 import {
   DEFAULT_SETTINGS,
   GENDER_OPTIONS,
@@ -17,37 +22,9 @@ import {
   PROFILE_KEY,
   SETTINGS_KEY,
 } from './lib/constants';
-import {
-  buildFallbackPlan,
-  buildPrompt,
-  callOpenAI,
-  formatDurationLabel,
-  parseWorkoutPlan,
-} from './lib/planner';
-import {
-  calculateBMI,
-  createId,
-  feetInchesToCm,
-  formatDateTime,
-  getHistoryPlannerContext,
-  getStreakDays,
-  minutesToLabel,
-  poundsToKg,
-  summarizeHistoryForPrompt,
-} from './lib/utils';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
-
-function getWorkoutItemId(exercise, index) {
-  if (exercise?.id) {
-    return String(exercise.id);
-  }
-  if (exercise?.name || exercise?.detail) {
-    return String(`${exercise?.name || 'exercise'}-${exercise?.detail || ''}-${index}`);
-  }
-  return String(index);
-}
 
 function App() {
   const [booting, setBooting] = useState(true);
@@ -172,7 +149,7 @@ function AppContextProvider({ value, children }) {
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
 
-function useAppData() {
+export function useAppData() {
   const ctx = React.useContext(AppContext);
   if (!ctx) {
     throw new Error('useAppData must be used within AppContextProvider');
@@ -211,10 +188,11 @@ function MainTabs() {
 function PlanStack() {
   return (
     <Stack.Navigator>
-      <Stack.Screen name="Planner" component={PlannerScreen} options={{ headerShown: false }} />
+      <Stack.Screen name="Planner" options={{ headerShown: false }}>
+        {(props) => <PlannerScreen {...props} useAppData={useAppData} styles={styles} />}
+      </Stack.Screen>
       <Stack.Screen
         name="PlanDetails"
-        component={PlanDetailsScreen}
         options={{
           title: 'Workout Plan',
           headerStyle: { backgroundColor: '#F8FAFC' },
@@ -223,7 +201,9 @@ function PlanStack() {
           headerTitleStyle: { fontSize: 18, fontWeight: '700' },
           headerHeight: 48,
         }}
-      />
+      >
+        {(props) => <PlanDetailsScreen {...props} />}
+      </Stack.Screen>
     </Stack.Navigator>
   );
 }
@@ -231,10 +211,11 @@ function PlanStack() {
 function HistoryStack() {
   return (
     <Stack.Navigator>
-      <Stack.Screen name="HistoryHome" component={HistoryScreen} options={{ headerShown: false }} />
+      <Stack.Screen name="HistoryHome" options={{ headerShown: false }}>
+        {(props) => <HistoryScreen {...props} />}
+      </Stack.Screen>
       <Stack.Screen
         name="HistoryDetails"
-        component={PlanDetailsScreen}
         options={{
           title: 'Saved Workout',
           headerStyle: { backgroundColor: '#F8FAFC' },
@@ -242,825 +223,66 @@ function HistoryStack() {
           headerTintColor: '#0F172A',
           headerHeight: 48,
         }}
-      />
+      >
+        {(props) => <PlanDetailsScreen {...props} />}
+      </Stack.Screen>
     </Stack.Navigator>
   );
 }
 
-function PlannerScreen({ navigation }) {
-  const { profile, history, settings, setHistory } = useAppData();
-  const [duration, setDuration] = useState(30);
-  const [environment, setEnvironment] = useState('Home');
-  const [intensity, setIntensity] = useState('Moderate');
-  const [equipment, setEquipment] = useState('Bodyweight');
-  const [focus, setFocus] = useState('Full Body');
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [error, setError] = useState('');
-
-  const environmentOptions = ['Home', 'Gym', 'Outdoor'];
-  const intensityOptions = ['Low', 'Moderate', 'High'];
-  const equipmentOptions = ['Bodyweight', 'Dumbbells', 'Bands', 'Full Gym'];
-  const focusOptions = ['Full Body', 'Upper Body', 'Lower Body', 'Core', 'Cardio'];
-
-  const focusValue = [focus];
-  const focusLabel = focus;
-
-  const bmi = useMemo(() => calculateBMI(profile.weightLbs, profile.heightFt, profile.heightIn), [profile]);
-  const streak = useMemo(() => getStreakDays(history), [history]);
-
-  const canGenerate = profile.age && profile.gender && profile.weightLbs && profile.heightFt && profile.goal;
-
-  const onGeneratePlan = async () => {
-    if (!canGenerate) {
-      Alert.alert('Complete your profile', 'Add your age, gender, weight, height, and goal first so the planner can personalize the workout.');
-      return;
-    }
-
-    setError('');
-    setIsGenerating(true);
-
-    const historySummary = summarizeHistoryForPrompt(history);
-    const plannerHistoryContext = getHistoryPlannerContext(history);
-    const prompt = buildPrompt({
-      profile,
-      duration,
-      environment,
-      intensity,
-      equipment,
-      focus: focusValue,
-      historySummary,
-    });
-
-    try {
-      let rawText = '';
-
-      if (settings.useOpenAI && settings.openAIApiKey) {
-        rawText = await callOpenAI({
-          apiKey: settings.openAIApiKey,
-          model: settings.openAIModel,
-          prompt,
-        });
-      } else {
-        rawText = buildFallbackPlan({
-          profile,
-          duration,
-          environment,
-          intensity,
-          equipment,
-          focus: focusValue,
-          historySummary: plannerHistoryContext,
-        });
-      }
-
-      const parsed = parseWorkoutPlan(rawText, {
-        title: focusLabel + ' ' + formatDurationLabel(duration),
-        duration,
-        environment,
-        intensity,
-        equipment,
-      });
-
-      const newItem = {
-        id: createId(),
-        createdAt: new Date().toISOString(),
-        source: settings.useOpenAI && settings.openAIApiKey ? 'AI' : 'Smart Local Planner',
-        duration,
-        environment,
-        intensity,
-        equipment,
-        focus: focusLabel,
-        prompt,
-        plan: parsed,
-      };
-
-      const nextHistory = [newItem, ...history].slice(0, 50);
-      await setHistory(nextHistory);
-      navigation.navigate('PlanDetails', { item: newItem, fromPlanner: true });
-    } catch (e) {
-      setError(e.message || 'Failed to generate workout plan.');
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  return (
-    <SafeAreaView style={styles.screen} edges={["top"]}>
-      <StatusBar barStyle="light-content" />
-      <LinearGradient colors={["#0F172A", "#1D4ED8", "#38BDF8"]} style={styles.heroGradient}>
-        <ScrollView
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-        >
-          <View style={styles.heroCard}>
-            <Text style={styles.eyebrow}>One tap workout planning</Text>
-            <Text style={styles.heroTitle}>Plan your workout</Text>
-
-            <View style={styles.metricsRow}>
-              <MetricPill label="Goal" value={profile.goal || 'Set profile'} />
-              <MetricPill label="BMI" value={bmi || '--'} />
-              <MetricPill label="Streak" value={streak + ' days'} />
-            </View>
-          </View>
-
-          <View style={styles.panel}>
-            <View style={styles.optionsRow}>
-              <DropdownField
-                label="Time"
-                value={minutesToLabel(duration)}
-                options={[15, 20, 30, 45, 60].map((item) => ({ label: minutesToLabel(item), value: item }))}
-                onChange={setDuration}
-                containerStyle={styles.optionInlineBlock}
-              />
-
-              <DropdownField
-                label="Place"
-                value={environment}
-                options={environmentOptions.map((item) => ({ label: item, value: item }))}
-                onChange={setEnvironment}
-                containerStyle={styles.optionInlineBlock}
-              />
-
-              <DropdownField
-                label="Intensity"
-                value={intensity}
-                options={intensityOptions.map((item) => ({ label: item, value: item }))}
-                onChange={setIntensity}
-                containerStyle={styles.optionInlineBlock}
-              />
-            </View>
-
-            <View style={styles.optionsRow}>
-              <DropdownField
-                label="Equipment"
-                value={equipment}
-                options={equipmentOptions.map((item) => ({ label: item, value: item }))}
-                onChange={setEquipment}
-                containerStyle={styles.optionInlineBlockWide}
-              />
-
-              <DropdownField
-                label="Focus"
-                value={focus}
-                options={focusOptions.map((item) => ({ label: item, value: item }))}
-                onChange={setFocus}
-                containerStyle={styles.optionInlineBlockWide}
-              />
-            </View>
-
-            {!canGenerate ? (
-              <View style={styles.warningBox}>
-                <MaterialIcons name="info" size={18} color="#92400E" />
-                <Text style={styles.warningText}>Complete your profile to unlock personalized planning.</Text>
-              </View>
-            ) : null}
-
-            {error ? (
-              <View style={styles.errorBox}>
-                <MaterialIcons name="error-outline" size={18} color="#B91C1C" />
-                <Text style={styles.errorText}>{error}</Text>
-              </View>
-            ) : null}
-
-            <Pressable
-              style={({ pressed }) => [styles.generateButton, pressed && { opacity: 0.92, transform: [{ scale: 0.99 }] }]}
-              onPress={onGeneratePlan}
-              disabled={isGenerating}
-            >
-              <LinearGradient colors={["#2563EB", "#1D4ED8"]} style={styles.generateGradient}>
-                {isGenerating ? (
-                  <ActivityIndicator color="#FFFFFF" />
-                ) : (
-                  <MaterialIcons name="auto-awesome" size={28} color="#FFFFFF" />
-                )}
-                <Text style={styles.generateTitle}>{isGenerating ? 'Generating your plan...' : 'Plan My Workout'}</Text>
-                <Text style={styles.generateSubtitle}>Personalized for {minutesToLabel(duration).toLowerCase()}</Text>
-              </LinearGradient>
-            </Pressable>
-          </View>
-
-          <View style={styles.secondaryPanel}>
-            <View style={styles.secondaryHeader}>
-              <Text style={styles.secondaryTitle}>Recent workouts</Text>
-              <Text style={styles.secondaryCount}>{history.length}</Text>
-            </View>
-            {history.length === 0 ? (
-              <EmptyState
-                icon="history"
-                title="No workouts yet"
-                subtitle="Your generated plans will appear here so the planner can adapt over time."
-              />
-            ) : (
-              history.slice(0, 3).map((item) => (
-                <Pressable
-                  key={item.id}
-                  style={styles.historyPreviewItem}
-                  onPress={() => navigation.navigate('PlanDetails', { item })}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.historyPreviewTitle}>{item.plan?.title || item.focus}</Text>
-                    <Text style={styles.historyPreviewMeta}>
-                      {formatDateTime(item.createdAt)} • {minutesToLabel(item.duration)} • {item.environment}
-                    </Text>
-                  </View>
-                  <MaterialIcons name="chevron-right" size={22} color="#94A3B8" />
-                </Pressable>
-              ))
-            )}
-          </View>
-        </ScrollView>
-      </LinearGradient>
-    </SafeAreaView>
-  );
+function getWorkoutItemId(exercise, index) {
+  if (exercise?.id) {
+    return String(exercise.id);
+  }
+  if (exercise?.name || exercise?.detail) {
+    return String(`${exercise?.name || 'exercise'}-${exercise?.detail || ''}-${index}`);
+  }
+  return String(index);
 }
 
 function PlanDetailsScreen({ route, navigation }) {
-  const routeItem = route.params.item;
   const { history, setHistory } = useAppData();
-  const historyItem = useMemo(() => history.find((entry) => entry.id === routeItem.id), [history, routeItem.id]);
-  const item = historyItem || routeItem;
-  const plan = item.plan || {};
-  const mainItems = Array.isArray(plan.main) ? plan.main : [];
-  const workoutItemIds = useMemo(() => mainItems.map((exercise, index) => getWorkoutItemId(exercise, index)), [mainItems]);
-  const [checkedItems, setCheckedItems] = useState(() => (item.checkedMainItemIds || []).filter((id) => workoutItemIds.includes(id)));
-
-  useEffect(() => {
-    setCheckedItems((item.checkedMainItemIds || []).filter((id) => workoutItemIds.includes(id)));
-  }, [item.checkedMainItemIds, workoutItemIds]);
-
-  const completedCount = checkedItems.length;
-  const totalCount = mainItems.length;
-
-  const toggleMainItem = async (exercise, index) => {
-    const exerciseId = getWorkoutItemId(exercise, index);
-    let nextCheckedItems = [];
-
-    setCheckedItems((currentCheckedItems) => {
-      nextCheckedItems = currentCheckedItems.includes(exerciseId)
-        ? currentCheckedItems.filter((id) => id !== exerciseId)
-        : [...currentCheckedItems, exerciseId];
-      return nextCheckedItems;
-    });
-
-    const nextHistory = history.map((historyEntry) =>
-      historyEntry.id === item.id
-        ? {
-            ...historyEntry,
-            checkedMainItemIds: nextCheckedItems,
-          }
-        : historyEntry
-    );
-
-    try {
-      await setHistory(nextHistory);
-    } catch (e) {
-      setCheckedItems((currentCheckedItems) =>
-        currentCheckedItems.includes(exerciseId)
-          ? currentCheckedItems.filter((id) => id !== exerciseId)
-          : [...currentCheckedItems, exerciseId]
-      );
-      Alert.alert('Save failed', 'Could not update workout progress on this device.');
-    }
-  };
-
   return (
-    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
-      <ScrollView contentContainerStyle={styles.detailsContainer} showsVerticalScrollIndicator={false}>
-        <View style={styles.detailsHero}>
-          <Text style={styles.detailsEyebrow}>{item.source}</Text>
-          <Text style={styles.detailsTitle}>{plan.title || item.focus || 'Workout Plan'}</Text>
-          <Text style={styles.detailsSubtitle}>{plan.summary || 'A balanced training plan tailored to your inputs.'}</Text>
-
-          <View style={styles.detailsBadges}>
-            <DetailBadge label={minutesToLabel(item.duration)} />
-            <DetailBadge label={item.environment} />
-            <DetailBadge label={item.intensity} />
-            <DetailBadge label={item.equipment} />
-          </View>
-        </View>
-
-        <SectionCard title="Warm-up" icon="local-fire-department">
-          {renderBullets(plan.warmup)}
-        </SectionCard>
-
-        <SectionCard title="Main workout" icon="fitness-center">
-          {totalCount > 0 ? (
-            <View style={styles.progressPill}>
-              <MaterialIcons name="check-circle" size={15} color="#2563EB" />
-              <Text style={styles.progressPillText}>{completedCount} of {totalCount} completed</Text>
-            </View>
-          ) : null}
-          {renderNumbered(plan.main || [], checkedItems, toggleMainItem)}
-        </SectionCard>
-
-        <SectionCard title="Cool-down" icon="self-improvement">
-          {renderBullets(plan.cooldown)}
-        </SectionCard>
-
-        <SectionCard title="Coach notes" icon="tips-and-updates">
-          {renderBullets(plan.tips)}
-        </SectionCard>
-
-        <View style={styles.detailsFooterNote}>
-          <MaterialIcons name="favorite" size={16} color="#2563EB" />
-          <Text style={styles.detailsFooterText}>Listen to your body and scale intensity if anything feels painful or unsafe.</Text>
-        </View>
-
-        <Pressable style={styles.secondaryAction} onPress={() => navigation.goBack()}>
-          <Text style={styles.secondaryActionText}>Back</Text>
-        </Pressable>
-      </ScrollView>
-    </SafeAreaView>
+    <WorkoutPlanView
+      route={route}
+      navigation={navigation}
+      history={history}
+      setHistory={setHistory}
+      getWorkoutItemId={getWorkoutItemId}
+      styles={styles}
+    />
   );
 }
 
 function HistoryScreen({ navigation }) {
   const { history, setHistory } = useAppData();
-  const [refreshing, setRefreshing] = useState(false);
-
-  const clearAll = () => {
-    Alert.alert('Clear history', 'Remove all saved workout plans from this device?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear',
-        style: 'destructive',
-        onPress: async () => {
-          await setHistory([]);
-        },
-      },
-    ]);
-  };
-
-  const onRefresh = async () => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 500);
-  };
-
-  return (
-    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
-      <ScrollView
-        contentContainerStyle={styles.historyContainer}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2563EB" />}
-      >
-        <View style={styles.pageHeaderCompact}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.pageTitleCompact}>Workout History</Text>
-            <Text style={styles.pageSubtitleCompact}>Review previous plans and keep your training consistent.</Text>
-          </View>
-          {history.length > 0 ? (
-            <Pressable style={styles.clearButton} onPress={clearAll}>
-              <Text style={styles.clearButtonText}>Clear</Text>
-            </Pressable>
-          ) : null}
-        </View>
-
-        {history.length === 0 ? (
-          <EmptyState
-            icon="event-note"
-            title="Nothing saved yet"
-            subtitle="Generate your first workout from the Plan tab and it will appear here."
-          />
-        ) : (
-          history.map((item) => (
-            <Pressable key={item.id} style={styles.historyCard} onPress={() => navigation.navigate('HistoryDetails', { item })}>
-              <View style={styles.historyCardTop}>
-                <View style={styles.historySourceBadge}>
-                  <Text style={styles.historySourceText}>{item.source}</Text>
-                </View>
-                <Text style={styles.historyDate}>{formatDateTime(item.createdAt)}</Text>
-              </View>
-              <Text style={styles.historyCardTitle}>{item.plan?.title || item.focus}</Text>
-              <Text style={styles.historyCardSummary} numberOfLines={2}>
-                {item.plan?.summary || 'Personalized workout plan'}
-              </Text>
-              <View style={styles.historyMetaRow}>
-                <SmallMeta text={minutesToLabel(item.duration)} />
-                <SmallMeta text={item.environment} />
-                <SmallMeta text={item.intensity} />
-              </View>
-            </Pressable>
-          ))
-        )}
-      </ScrollView>
-    </SafeAreaView>
-  );
+  return <HistorySection navigation={navigation} history={history} setHistory={setHistory} styles={styles} />;
 }
 
 function ProfileScreen() {
   const { profile, setProfile, history } = useAppData();
-  const [draft, setDraft] = useState(profile);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    setDraft(profile);
-  }, [profile]);
-
-  const bmi = calculateBMI(draft.weightLbs, draft.heightFt, draft.heightIn);
-
-  const save = async () => {
-    if (!draft.age || !draft.gender || !draft.weightLbs || !draft.heightFt || !draft.goal) {
-      Alert.alert('Missing details', 'Please fill in age, gender, weight, height, and goal.');
-      return;
-    }
-    setSaving(true);
-    try {
-      await setProfile(draft);
-      Alert.alert('Saved', 'Your profile has been updated.');
-    } catch (e) {
-      Alert.alert('Save failed', 'Could not save your profile.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
   return (
-    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
-      <ScrollView contentContainerStyle={styles.formContainer} showsVerticalScrollIndicator={false}>
-        <View style={styles.pageHeader}>
-          <View>
-            <Text style={styles.pageTitle}>Your Profile</Text>
-            <Text style={styles.pageSubtitle}>The better your profile, the better the workout recommendations.</Text>
-          </View>
-        </View>
-
-        <View style={styles.profileSummaryCard}>
-          <View style={styles.profileSummaryTop}>
-            <View>
-              <Text style={styles.profileSummaryName}>{draft.name || 'Athlete'}</Text>
-              <Text style={styles.profileSummaryGoal}>{draft.goal || 'Set a goal'}</Text>
-            </View>
-            <View style={styles.profileSummaryCircle}>
-              <Text style={styles.profileSummaryCircleValue}>{history.length}</Text>
-              <Text style={styles.profileSummaryCircleLabel}>Plans</Text>
-            </View>
-          </View>
-          <View style={styles.profileStatsRow}>
-            <MetricPillLight label="BMI" value={bmi || '--'} />
-            <MetricPillLight label="Experience" value={draft.experience || '--'} />
-          </View>
-        </View>
-
-        <InputCard label="Name">
-          <StyledInput value={draft.name} onChangeText={(value) => setDraft({ ...draft, name: value })} placeholder="Your name" />
-        </InputCard>
-
-        <View style={styles.doubleRow}>
-          <InputCard label="Age" style={{ flex: 1 }}>
-            <StyledInput
-              value={String(draft.age || '')}
-              onChangeText={(value) => setDraft({ ...draft, age: value.replace(/[^0-9]/g, '') })}
-              keyboardType="number-pad"
-              placeholder="32"
-            />
-          </InputCard>
-          <InputCard label="Weight (lbs)" style={{ flex: 1 }}>
-            <StyledInput
-              value={String(draft.weightLbs || '')}
-              onChangeText={(value) => setDraft({ ...draft, weightLbs: value.replace(/[^0-9.]/g, '') })}
-              keyboardType="decimal-pad"
-              placeholder="172"
-            />
-          </InputCard>
-        </View>
-
-        <View style={styles.tripleRow}>
-          <InputCard label="Height (ft)" style={{ flex: 1 }}>
-            <StyledInput
-              value={String(draft.heightFt || '')}
-              onChangeText={(value) => setDraft({ ...draft, heightFt: value.replace(/[^0-9]/g, '') })}
-              keyboardType="number-pad"
-              placeholder="5"
-            />
-          </InputCard>
-          <InputCard label="Height (in)" style={{ flex: 1 }}>
-            <StyledInput
-              value={String(draft.heightIn || '')}
-              onChangeText={(value) => setDraft({ ...draft, heightIn: value.replace(/[^0-9]/g, '') })}
-              keyboardType="number-pad"
-              placeholder="9"
-            />
-          </InputCard>
-        </View>
-
-        <OptionChips
-          title="Gender"
-          options={GENDER_OPTIONS.map((item) => ({ label: item, value: item }))}
-          value={draft.gender}
-          onChange={(value) => setDraft({ ...draft, gender: value })}
-          containerStyle={styles.chipsOnLight}
-        />
-
-        <OptionChips
-          title="Primary goal"
-          options={GOAL_OPTIONS.map((item) => ({ label: item, value: item }))}
-          value={draft.goal}
-          onChange={(value) => setDraft({ ...draft, goal: value })}
-          containerStyle={styles.chipsOnLight}
-        />
-
-        <OptionChips
-          title="Experience"
-          options={['Beginner', 'Intermediate', 'Advanced'].map((item) => ({ label: item, value: item }))}
-          value={draft.experience}
-          onChange={(value) => setDraft({ ...draft, experience: value })}
-          containerStyle={styles.chipsOnLight}
-        />
-
-        <InputCard label="Limitations or injuries">
-          <StyledInput
-            value={draft.limitations}
-            onChangeText={(value) => setDraft({ ...draft, limitations: value })}
-            placeholder="Example: sensitive knees, lower back tightness"
-            multiline
-            numberOfLines={4}
-            inputStyle={{ minHeight: 96, textAlignVertical: 'top' }}
-          />
-        </InputCard>
-
-        <Pressable style={styles.primaryAction} onPress={save} disabled={saving}>
-          <Text style={styles.primaryActionText}>{saving ? 'Saving...' : 'Save Profile'}</Text>
-        </Pressable>
-      </ScrollView>
-    </SafeAreaView>
+    <ProfileForm
+      profile={profile}
+      setProfile={setProfile}
+      history={history}
+      styles={styles}
+      genderOptions={GENDER_OPTIONS}
+      goalOptions={GOAL_OPTIONS}
+    />
   );
 }
 
 function SettingsScreen() {
   const { settings, setSettings } = useAppData();
-  const [draft, setDraft] = useState(settings);
-  const [modalVisible, setModalVisible] = useState(false);
-
-  useEffect(() => {
-    setDraft(settings);
-  }, [settings]);
-
-  const save = async () => {
-    await setSettings(draft);
-    Alert.alert('Saved', 'Your planner settings were updated.');
-  };
-
   return (
-    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
-      <ScrollView contentContainerStyle={styles.formContainer} showsVerticalScrollIndicator={false}>
-        <View style={styles.pageHeader}>
-          <View>
-            <Text style={styles.pageTitle}>Settings</Text>
-            <Text style={styles.pageSubtitle}>Use a local smart planner or connect your own OpenAI API key.</Text>
-          </View>
-        </View>
-
-        <View style={styles.settingsCard}>
-          <View style={styles.settingsRow}>
-            <View style={{ flex: 1, paddingRight: 12 }}>
-              <Text style={styles.settingsTitle}>Use OpenAI</Text>
-              <Text style={styles.settingsDescription}>
-                Enable live LLM-generated workout plans using your own API key.
-              </Text>
-            </View>
-            <Switch
-              value={draft.useOpenAI}
-              onValueChange={(value) => setDraft({ ...draft, useOpenAI: value })}
-              trackColor={{ false: '#CBD5E1', true: '#93C5FD' }}
-              thumbColor={draft.useOpenAI ? '#2563EB' : '#F8FAFC'}
-            />
-          </View>
-        </View>
-
-        <InputCard label="OpenAI API Key">
-          <StyledInput
-            value={draft.openAIApiKey}
-            onChangeText={(value) => setDraft({ ...draft, openAIApiKey: value.trim() })}
-            placeholder="sk-..."
-            secureTextEntry
-          />
-          <Text style={styles.helperText}>Your key stays on this device via AsyncStorage. No hidden secrets are bundled in the app.</Text>
-        </InputCard>
-
-        <InputCard label="Model">
-          <Pressable style={styles.selectorButton} onPress={() => setModalVisible(true)}>
-            <Text style={styles.selectorValue}>{draft.openAIModel}</Text>
-            <MaterialIcons name="expand-more" size={20} color="#475569" />
-          </Pressable>
-        </InputCard>
-
-        <View style={styles.infoCard}>
-          <MaterialIcons name="shield" size={22} color="#2563EB" />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.infoTitle}>Privacy & reliability</Text>
-            <Text style={styles.infoText}>
-              If AI is turned off or the key is missing, the app still creates a quality workout using its built-in local planner.
-            </Text>
-          </View>
-        </View>
-
-        <Pressable style={styles.primaryAction} onPress={save}>
-          <Text style={styles.primaryActionText}>Save Settings</Text>
-        </Pressable>
-
-        <Modal visible={modalVisible} transparent animationType="slide" onRequestClose={() => setModalVisible(false)}>
-          <View style={styles.modalBackdrop}>
-            <View style={styles.modalSheet}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Choose model</Text>
-                <Pressable onPress={() => setModalVisible(false)}>
-                  <MaterialIcons name="close" size={22} color="#0F172A" />
-                </Pressable>
-              </View>
-              {OPENAI_MODELS.map((model) => (
-                <Pressable
-                  key={model}
-                  style={styles.modelRow}
-                  onPress={() => {
-                    setDraft({ ...draft, openAIModel: model });
-                    setModalVisible(false);
-                  }}
-                >
-                  <Text style={styles.modelText}>{model}</Text>
-                  {draft.openAIModel === model ? <MaterialIcons name="check-circle" size={20} color="#2563EB" /> : null}
-                </Pressable>
-              ))}
-            </View>
-          </View>
-        </Modal>
-      </ScrollView>
-    </SafeAreaView>
+    <PlanControls
+      settings={settings}
+      setSettings={setSettings}
+      styles={styles}
+      models={OPENAI_MODELS}
+    />
   );
-}
-
-function OptionChips({ title, options, value, onChange, containerStyle }) {
-  return (
-    <View style={[styles.optionBlock, containerStyle]}>
-      <Text style={styles.optionTitle}>{title}</Text>
-      <View style={styles.chipsWrap}>
-        {options.map((option) => {
-          const selected = value === option.value;
-          return (
-            <Pressable
-              key={String(option.value)}
-              style={[styles.chip, selected && styles.chipSelected]}
-              onPress={() => onChange(option.value)}
-            >
-              <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{option.label}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
-    </View>
-  );
-}
-
-function DropdownField({ label, value, options, onChange, containerStyle }) {
-  const [modalVisible, setModalVisible] = useState(false);
-
-  return (
-    <View style={[styles.optionBlock, containerStyle]}>
-      <Text style={styles.optionTitle}>{label}</Text>
-      <Pressable style={styles.dropdownButton} onPress={() => setModalVisible(true)}>
-        <Text style={styles.dropdownButtonText} numberOfLines={1}>{value}</Text>
-      </Pressable>
-
-      <Modal visible={modalVisible} transparent animationType="slide" onRequestClose={() => setModalVisible(false)}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Choose {label.toLowerCase()}</Text>
-              <Pressable onPress={() => setModalVisible(false)}>
-                <MaterialIcons name="close" size={22} color="#0F172A" />
-              </Pressable>
-            </View>
-            {options.map((option) => {
-              const selected = value === option.label || value === option.value;
-              return (
-                <Pressable
-                  key={String(option.value)}
-                  style={styles.modelRow}
-                  onPress={() => {
-                    onChange(option.value);
-                    setModalVisible(false);
-                  }}
-                >
-                  <Text style={styles.modelText}>{option.label}</Text>
-                  {selected ? <MaterialIcons name="check-circle" size={20} color="#2563EB" /> : null}
-                </Pressable>
-              );
-            })}
-          </View>
-        </View>
-      </Modal>
-    </View>
-  );
-}
-
-function EmptyState({ icon, title, subtitle }) {
-  return (
-    <View style={styles.emptyState}>
-      <View style={styles.emptyIconWrap}>
-        <MaterialIcons name={icon} size={28} color="#2563EB" />
-      </View>
-      <Text style={styles.emptyTitle}>{title}</Text>
-      <Text style={styles.emptySubtitle}>{subtitle}</Text>
-    </View>
-  );
-}
-
-function MetricPill({ label, value }) {
-  return (
-    <View style={styles.metricPill}>
-      <Text style={styles.metricLabel}>{label}</Text>
-      <Text style={styles.metricValue}>{value}</Text>
-    </View>
-  );
-}
-
-function MetricPillLight({ label, value }) {
-  return (
-    <View style={styles.metricPillLight}>
-      <Text style={styles.metricLabelLight}>{label}</Text>
-      <Text style={styles.metricValueLight}>{value}</Text>
-    </View>
-  );
-}
-
-function InputCard({ label, children, style }) {
-  return (
-    <View style={[styles.inputCard, style]}>
-      <Text style={styles.inputLabel}>{label}</Text>
-      {children}
-    </View>
-  );
-}
-
-function StyledInput({ inputStyle, ...props }) {
-  return <TextInput placeholderTextColor="#94A3B8" style={[styles.input, inputStyle]} {...props} />;
-}
-
-function DetailBadge({ label }) {
-  return (
-    <View style={styles.detailBadge}>
-      <Text style={styles.detailBadgeText}>{label}</Text>
-    </View>
-  );
-}
-
-function SectionCard({ title, icon, children }) {
-  return (
-    <View style={styles.sectionCard}>
-      <View style={styles.sectionCardHeader}>
-        <MaterialIcons name={icon} size={18} color="#2563EB" />
-        <Text style={styles.sectionCardTitle}>{title}</Text>
-      </View>
-      <View style={{ gap: 10 }}>{children}</View>
-    </View>
-  );
-}
-
-function SmallMeta({ text }) {
-  return (
-    <View style={styles.smallMeta}>
-      <Text style={styles.smallMetaText}>{text}</Text>
-    </View>
-  );
-}
-
-function renderBullets(items) {
-  if (!items || items.length === 0) {
-    return <Text style={styles.fallbackText}>No items available.</Text>;
-  }
-  return items.map((item, index) => (
-    <View key={index} style={styles.bulletRow}>
-      <View style={styles.bulletDot} />
-      <Text style={styles.bulletText}>{item}</Text>
-    </View>
-  ));
-}
-
-function renderNumbered(items, checkedItems = [], onToggleItem) {
-  if (!items || items.length === 0) {
-    return <Text style={styles.fallbackText}>No exercises available.</Text>;
-  }
-  return items.map((item, index) => {
-    const itemId = getWorkoutItemId(item, index);
-    const isChecked = checkedItems.includes(itemId);
-
-    return (
-      <Pressable
-        key={itemId}
-        style={[styles.numberedRow, styles.checkableRow, isChecked && styles.checkableRowChecked]}
-        onPress={onToggleItem ? () => onToggleItem(item, index) : undefined}
-        disabled={!onToggleItem}
-      >
-        <View style={styles.numberBubble}>
-          <Text style={styles.numberBubbleText}>{index + 1}</Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={[styles.numberedTitle, isChecked && styles.completedText]}>{item.name || 'Exercise'}</Text>
-          <Text style={[styles.numberedDetail, isChecked && styles.completedDetail]}>{item.detail || ''}</Text>
-        </View>
-        <View pointerEvents="none" style={[styles.checkbox, isChecked && styles.checkboxChecked]}>
-          {isChecked ? <MaterialIcons name="check" size={16} color="#FFFFFF" /> : null}
-        </View>
-      </Pressable>
-    );
-  });
 }
 
 const navTheme = {
