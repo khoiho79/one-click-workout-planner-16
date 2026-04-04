@@ -1,20 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Modal,
-  Pressable,
-  RefreshControl,
-  SafeAreaView,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ActivityIndicator, Alert, Modal, Pressable, RefreshControl, ScrollView, StatusBar, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { SafeAreaProvider, useSafeAreaInsets, SafeAreaView } from "react-native-safe-area-context";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -52,6 +38,16 @@ import {
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
+
+function getWorkoutItemId(exercise, index) {
+  if (exercise?.id) {
+    return String(exercise.id);
+  }
+  if (exercise?.name || exercise?.detail) {
+    return String(`${exercise?.name || 'exercise'}-${exercise?.detail || ''}-${index}`);
+  }
+  return String(index);
+}
 
 function App() {
   const [booting, setBooting] = useState(true);
@@ -144,7 +140,7 @@ function App() {
   if (booting) {
     return (
       <SafeAreaProvider>
-        <SafeAreaView style={styles.bootContainer}>
+        <SafeAreaView style={styles.bootContainer} edges={["top", "left", "right", "bottom"]}>
           <ExpoStatusBar style="light" />
           <StatusBar barStyle="light-content" />
           <LinearGradient colors={["#0B1220", "#111827", "#1E293B"]} style={StyleSheet.absoluteFill} />
@@ -224,6 +220,8 @@ function PlanStack() {
           headerStyle: { backgroundColor: '#F8FAFC' },
           headerShadowVisible: false,
           headerTintColor: '#0F172A',
+          headerTitleStyle: { fontSize: 18, fontWeight: '700' },
+          headerHeight: 48,
         }}
       />
     </Stack.Navigator>
@@ -242,6 +240,7 @@ function HistoryStack() {
           headerStyle: { backgroundColor: '#F8FAFC' },
           headerShadowVisible: false,
           headerTintColor: '#0F172A',
+          headerHeight: 48,
         }}
       />
     </Stack.Navigator>
@@ -249,7 +248,6 @@ function HistoryStack() {
 }
 
 function PlannerScreen({ navigation }) {
-  const insets = useSafeAreaInsets();
   const { profile, history, settings, setHistory } = useAppData();
   const [duration, setDuration] = useState(30);
   const [environment, setEnvironment] = useState('Home');
@@ -346,11 +344,11 @@ function PlannerScreen({ navigation }) {
   };
 
   return (
-    <SafeAreaView style={styles.screen}>
+    <SafeAreaView style={styles.screen} edges={["top"]}>
       <StatusBar barStyle="light-content" />
       <LinearGradient colors={["#0F172A", "#1D4ED8", "#38BDF8"]} style={styles.heroGradient}>
         <ScrollView
-          contentContainerStyle={[styles.scrollContent, { paddingTop: Math.max(insets.top, 10) }]}
+          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.heroCard}>
@@ -435,7 +433,7 @@ function PlannerScreen({ navigation }) {
                   <MaterialIcons name="auto-awesome" size={28} color="#FFFFFF" />
                 )}
                 <Text style={styles.generateTitle}>{isGenerating ? 'Generating your plan...' : 'Plan My Workout'}</Text>
-                <Text style={styles.generateSubtitle}>Simple, fast, and personalized for {minutesToLabel(duration).toLowerCase()}</Text>
+                <Text style={styles.generateSubtitle}>Personalized for {minutesToLabel(duration).toLowerCase()}</Text>
               </LinearGradient>
             </Pressable>
           </View>
@@ -476,11 +474,56 @@ function PlannerScreen({ navigation }) {
 }
 
 function PlanDetailsScreen({ route, navigation }) {
-  const { item } = route.params;
+  const routeItem = route.params.item;
+  const { history, setHistory } = useAppData();
+  const historyItem = useMemo(() => history.find((entry) => entry.id === routeItem.id), [history, routeItem.id]);
+  const item = historyItem || routeItem;
   const plan = item.plan || {};
+  const mainItems = Array.isArray(plan.main) ? plan.main : [];
+  const workoutItemIds = useMemo(() => mainItems.map((exercise, index) => getWorkoutItemId(exercise, index)), [mainItems]);
+  const [checkedItems, setCheckedItems] = useState(() => (item.checkedMainItemIds || []).filter((id) => workoutItemIds.includes(id)));
+
+  useEffect(() => {
+    setCheckedItems((item.checkedMainItemIds || []).filter((id) => workoutItemIds.includes(id)));
+  }, [item.checkedMainItemIds, workoutItemIds]);
+
+  const completedCount = checkedItems.length;
+  const totalCount = mainItems.length;
+
+  const toggleMainItem = async (exercise, index) => {
+    const exerciseId = getWorkoutItemId(exercise, index);
+    let nextCheckedItems = [];
+
+    setCheckedItems((currentCheckedItems) => {
+      nextCheckedItems = currentCheckedItems.includes(exerciseId)
+        ? currentCheckedItems.filter((id) => id !== exerciseId)
+        : [...currentCheckedItems, exerciseId];
+      return nextCheckedItems;
+    });
+
+    const nextHistory = history.map((historyEntry) =>
+      historyEntry.id === item.id
+        ? {
+            ...historyEntry,
+            checkedMainItemIds: nextCheckedItems,
+          }
+        : historyEntry
+    );
+
+    try {
+      await setHistory(nextHistory);
+    } catch (e) {
+      setCheckedItems((currentCheckedItems) =>
+        currentCheckedItems.includes(exerciseId)
+          ? currentCheckedItems.filter((id) => id !== exerciseId)
+          : [...currentCheckedItems, exerciseId]
+      );
+      Alert.alert('Save failed', 'Could not update workout progress on this device.');
+    }
+  };
 
   return (
-    <SafeAreaView style={styles.lightScreen}>
+    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.detailsContainer} showsVerticalScrollIndicator={false}>
         <View style={styles.detailsHero}>
           <Text style={styles.detailsEyebrow}>{item.source}</Text>
@@ -500,7 +543,13 @@ function PlanDetailsScreen({ route, navigation }) {
         </SectionCard>
 
         <SectionCard title="Main workout" icon="fitness-center">
-          {renderNumbered(plan.main || [])}
+          {totalCount > 0 ? (
+            <View style={styles.progressPill}>
+              <MaterialIcons name="check-circle" size={15} color="#2563EB" />
+              <Text style={styles.progressPillText}>{completedCount} of {totalCount} completed</Text>
+            </View>
+          ) : null}
+          {renderNumbered(plan.main || [], checkedItems, toggleMainItem)}
         </SectionCard>
 
         <SectionCard title="Cool-down" icon="self-improvement">
@@ -547,15 +596,15 @@ function HistoryScreen({ navigation }) {
   };
 
   return (
-    <SafeAreaView style={styles.lightScreen}>
+    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
       <ScrollView
         contentContainerStyle={styles.historyContainer}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#2563EB" />}
       >
-        <View style={styles.pageHeader}>
-          <View>
-            <Text style={styles.pageTitle}>Workout History</Text>
-            <Text style={styles.pageSubtitle}>Review previous plans and keep your training consistent.</Text>
+        <View style={styles.pageHeaderCompact}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.pageTitleCompact}>Workout History</Text>
+            <Text style={styles.pageSubtitleCompact}>Review previous plans and keep your training consistent.</Text>
           </View>
           {history.length > 0 ? (
             <Pressable style={styles.clearButton} onPress={clearAll}>
@@ -624,7 +673,7 @@ function ProfileScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.lightScreen}>
+    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.formContainer} showsVerticalScrollIndicator={false}>
         <View style={styles.pageHeader}>
           <View>
@@ -750,7 +799,7 @@ function SettingsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.lightScreen}>
+    <SafeAreaView style={styles.lightScreen} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.formContainer} showsVerticalScrollIndicator={false}>
         <View style={styles.pageHeader}>
           <View>
@@ -956,7 +1005,7 @@ function SectionCard({ title, icon, children }) {
   return (
     <View style={styles.sectionCard}>
       <View style={styles.sectionCardHeader}>
-        <MaterialIcons name={icon} size={20} color="#2563EB" />
+        <MaterialIcons name={icon} size={18} color="#2563EB" />
         <Text style={styles.sectionCardTitle}>{title}</Text>
       </View>
       <View style={{ gap: 10 }}>{children}</View>
@@ -984,21 +1033,34 @@ function renderBullets(items) {
   ));
 }
 
-function renderNumbered(items) {
+function renderNumbered(items, checkedItems = [], onToggleItem) {
   if (!items || items.length === 0) {
     return <Text style={styles.fallbackText}>No exercises available.</Text>;
   }
-  return items.map((item, index) => (
-    <View key={index} style={styles.numberedRow}>
-      <View style={styles.numberBubble}>
-        <Text style={styles.numberBubbleText}>{index + 1}</Text>
-      </View>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.numberedTitle}>{item.name || 'Exercise'}</Text>
-        <Text style={styles.numberedDetail}>{item.detail || ''}</Text>
-      </View>
-    </View>
-  ));
+  return items.map((item, index) => {
+    const itemId = getWorkoutItemId(item, index);
+    const isChecked = checkedItems.includes(itemId);
+
+    return (
+      <Pressable
+        key={itemId}
+        style={[styles.numberedRow, styles.checkableRow, isChecked && styles.checkableRowChecked]}
+        onPress={onToggleItem ? () => onToggleItem(item, index) : undefined}
+        disabled={!onToggleItem}
+      >
+        <View style={styles.numberBubble}>
+          <Text style={styles.numberBubbleText}>{index + 1}</Text>
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.numberedTitle, isChecked && styles.completedText]}>{item.name || 'Exercise'}</Text>
+          <Text style={[styles.numberedDetail, isChecked && styles.completedDetail]}>{item.detail || ''}</Text>
+        </View>
+        <View pointerEvents="none" style={[styles.checkbox, isChecked && styles.checkboxChecked]}>
+          {isChecked ? <MaterialIcons name="check" size={16} color="#FFFFFF" /> : null}
+        </View>
+      </Pressable>
+    );
+  });
 }
 
 const navTheme = {
@@ -1047,23 +1109,23 @@ const styles = StyleSheet.create({
     paddingBottom: 120,
   },
   heroCard: {
-    paddingTop: 20,
+    paddingTop: 8,
     paddingHorizontal: 20,
-    paddingBottom: 18,
+    paddingBottom: 6,
   },
   eyebrow: {
     color: '#BFDBFE',
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 1,
   },
   heroTitle: {
     color: '#FFFFFF',
-    fontSize: 32,
-    lineHeight: 38,
+    fontSize: 18,
+    lineHeight: 23,
     fontWeight: '800',
-    marginTop: 10,
+    marginTop: 2,
   },
   heroSubtitle: {
     color: '#DBEAFE',
@@ -1074,28 +1136,28 @@ const styles = StyleSheet.create({
   metricsRow: {
     flexDirection: 'row',
     gap: 10,
-    marginTop: 18,
+    marginTop: 8,
   },
   metricPill: {
     flex: 1,
     backgroundColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 16,
-    padding: 12,
+    borderRadius: 14,
+    padding: 10,
   },
   metricLabel: {
     color: '#BFDBFE',
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     textTransform: 'uppercase',
   },
   metricValue: {
     color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
-    marginTop: 6,
+    marginTop: 4,
   },
   panel: {
-    marginTop: 8,
+    marginTop: 6,
     marginHorizontal: 16,
     backgroundColor: '#FFFFFF',
     borderRadius: 24,
@@ -1214,55 +1276,56 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   generateGradient: {
-    paddingVertical: 22,
+    paddingVertical: 18,
     paddingHorizontal: 18,
     alignItems: 'center',
     justifyContent: 'center',
   },
   generateTitle: {
     color: '#FFFFFF',
-    fontSize: 24,
+    fontSize: 21,
     fontWeight: '800',
     marginTop: 8,
   },
   generateSubtitle: {
     color: '#DBEAFE',
-    fontSize: 13,
-    marginTop: 6,
+    fontSize: 12,
+    marginTop: 4,
     textAlign: 'center',
   },
   secondaryPanel: {
-    marginTop: 16,
+    marginTop: 14,
     marginHorizontal: 16,
     marginBottom: 16,
     backgroundColor: '#F8FAFC',
     borderRadius: 24,
-    padding: 16,
+    padding: 14,
   },
   secondaryHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   secondaryTitle: {
     color: '#0F172A',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
   },
   secondaryCount: {
     color: '#2563EB',
     backgroundColor: '#DBEAFE',
     paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingVertical: 3,
     borderRadius: 999,
     fontWeight: '800',
+    fontSize: 12,
   },
   historyPreviewItem: {
     backgroundColor: '#FFFFFF',
     borderRadius: 18,
     padding: 14,
-    marginTop: 10,
+    marginTop: 8,
     flexDirection: 'row',
     alignItems: 'center',
   },
@@ -1286,61 +1349,77 @@ const styles = StyleSheet.create({
   },
   detailsHero: {
     backgroundColor: '#0F172A',
-    borderRadius: 24,
-    padding: 20,
+    borderRadius: 20,
+    padding: 12,
   },
   detailsEyebrow: {
     color: '#93C5FD',
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '800',
     textTransform: 'uppercase',
     letterSpacing: 1,
   },
   detailsTitle: {
     color: '#FFFFFF',
-    fontSize: 28,
+    fontSize: 19,
     fontWeight: '800',
-    marginTop: 8,
+    marginTop: 4,
   },
   detailsSubtitle: {
     color: '#CBD5E1',
-    fontSize: 14,
-    lineHeight: 21,
-    marginTop: 8,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 4,
   },
   detailsBadges: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
-    marginTop: 16,
+    marginTop: 10,
   },
   detailBadge: {
     backgroundColor: '#1E293B',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     borderRadius: 999,
   },
   detailBadgeText: {
     color: '#E2E8F0',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
   sectionCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 22,
-    padding: 16,
-    marginTop: 14,
+    borderRadius: 20,
+    padding: 14,
+    marginTop: 12,
   },
   sectionCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 12,
+    marginBottom: 10,
   },
   sectionCardTitle: {
     color: '#0F172A',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
+  },
+  progressPill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#EFF6FF',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 4,
+  },
+  progressPillText: {
+    color: '#1D4ED8',
+    fontSize: 12,
+    fontWeight: '700',
   },
   bulletRow: {
     flexDirection: 'row',
@@ -1365,6 +1444,17 @@ const styles = StyleSheet.create({
     gap: 12,
     alignItems: 'flex-start',
   },
+  checkableRow: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 18,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  checkableRowChecked: {
+    backgroundColor: '#F0FDF4',
+    borderColor: '#86EFAC',
+  },
   numberBubble: {
     width: 30,
     height: 30,
@@ -1387,6 +1477,28 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
     marginTop: 4,
+  },
+  completedText: {
+    color: '#64748B',
+    textDecorationLine: 'line-through',
+  },
+  completedDetail: {
+    color: '#94A3B8',
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#CBD5E1',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  checkboxChecked: {
+    backgroundColor: '#22C55E',
+    borderColor: '#22C55E',
   },
   fallbackText: {
     color: '#64748B',
@@ -1428,9 +1540,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
+  pageHeaderCompact: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
   pageTitle: {
     color: '#0F172A',
     fontSize: 28,
+    fontWeight: '800',
+  },
+  pageTitleCompact: {
+    color: '#0F172A',
+    fontSize: 22,
     fontWeight: '800',
   },
   pageSubtitle: {
@@ -1438,6 +1561,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     marginTop: 6,
+    maxWidth: 280,
+  },
+  pageSubtitleCompact: {
+    color: '#64748B',
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 4,
     maxWidth: 280,
   },
   clearButton: {
